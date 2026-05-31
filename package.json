@@ -1,0 +1,48 @@
+{
+  "name": "homebridge-renson-healthbox3",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for the Renson Healthbox 3 ventilation unit. Exposes room sensors, ventilation rates, fan metrics, boost and profile control.",
+  "main": "index.js",
+  "customUi": true,
+  "keywords": [
+    "homebridge-plugin",
+    "homebridge",
+    "homekit",
+    "renson",
+    "healthbox",
+    "healthbox3",
+    "ventilation",
+    "vmc",
+    "air-quality"
+  ],
+  "engines": {
+    "node": ">=18.0.0",
+    "homebridge": ">=1.6.0"
+  },
+  "dependencies": {
+    "@homebridge/plugin-ui-utils": "^1.0.0",
+    "mqtt": "^5.15.1"
+  },
+  "peerDependencies": {
+    "homebridge": ">=1.6.0"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "barichon21",
+    "url": "https://github.com/barichon21"
+  },
+  "maintainers": [
+    {
+      "name": "barichon21",
+      "url": "https://github.com/barichon21"
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/barichon21/homebridge-renson-healthbox3"
+  },
+  "bugs": {
+    "url": "https://github.com/barichon21/homebridge-renson-healthbox3/issues"
+  },
+  "homepage": "https://github.com/barichon21/homebridge-renson-healthbox3#readme"
+}

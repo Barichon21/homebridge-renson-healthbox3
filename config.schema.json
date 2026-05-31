@@ -1,0 +1,145 @@
+{
+  "pluginAlias": "HealthBoxHomebridgePlugin",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Renson Healthbox 3",
+        "description": "Display name for the platform."
+      },
+      "host": {
+        "title": "Healthbox Host",
+        "type": "string",
+        "format": "hostname",
+        "placeholder": "192.168.x.x",
+        "description": "IP address or hostname of the Healthbox unit. Use this or healthBoxUri."
+      },
+
+      "apiKey": {
+        "title": "Advanced API Key",
+        "type": "string",
+        "description": "Renson local advanced API key. When set, the plugin activates it on startup to unlock electrical fan metrics (power, pressure, RPM, voltage)."
+      },
+      "pollInterval": {
+        "title": "Poll Interval (seconds)",
+        "type": "integer",
+        "default": 30,
+        "minimum": 5,
+        "description": "Seconds between data refreshes."
+      },
+      "requestTimeout": {
+        "title": "Request Timeout (seconds)",
+        "type": "integer",
+        "default": 10,
+        "minimum": 1,
+        "description": "HTTP timeout when calling the Healthbox."
+      },
+      "enableBoostControl": {
+        "title": "Enable Boost Control",
+        "type": "boolean",
+        "default": false,
+        "description": "Expose Room boost as a controllable switch (use Non specific Global Boost settings below)."
+      },
+      "boostFanSpeed": {
+        "title": "Boost Fan Speed (%)",
+        "type": "integer",
+        "default": 100,
+        "minimum": 10,
+        "maximum": 200,
+        "description": "Boost level sent when boost control is enabled.",
+        "condition": {
+          "functionBody": "return model.enableBoostControl === true;"
+        }
+      },
+      "boostDuration": {
+        "title": "Boost Duration (seconds)",
+        "type": "integer",
+        "default": 600,
+        "minimum": 300,
+        "maximum": 86400,
+        "description": "Boost duration in seconds (max 86400 = 24 h).",
+        "condition": {
+          "functionBody": "return model.enableBoostControl === true;"
+        }
+      },
+      "roomBoostOverrides": {
+        "title": "Per-Room Boost Overrides",
+        "type": "array",
+        "description": "Override boost level and/or duration for specific rooms. Use the numeric room ID shown in Homebridge logs (e.g. 1, 2, 3…). Leave a field empty to fall back to the global setting.",
+        "condition": {
+          "functionBody": "return model.enableBoostControl === true;"
+        },
+        "items": {
+          "type": "object",
+          "properties": {
+            "room": {
+              "title": "Room ID",
+              "type": "string",
+              "placeholder": "1",
+              "description": "Numeric room ID from /v2/api/data/current (visible in Homebridge logs at startup)."
+            },
+            "boostLevel": {
+              "title": "Boost Fan Speed (%)",
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 200,
+              "description": "Override boost level for this room. Leave empty to use the global value."
+            },
+            "boostDuration": {
+              "title": "Boost Duration (seconds)",
+              "type": "integer",
+              "minimum": 300,
+              "maximum": 86400,
+              "description": "Override boost duration for this room. Leave empty to use the global value."
+            }
+          },
+          "required": ["room"]
+        }
+      },
+      "enableProfileControl": {
+        "title": "Enable Profile Control",
+        "type": "boolean",
+        "default": false,
+        "description": "Expose a fan accessory per room to switch the ventilation profile: eco (33%), health (67%), intense (100%)."
+      },
+      "disableLogging": {
+        "title": "Disable Logging",
+        "type": "boolean",
+        "default": false,
+        "description": "Silence info/debug messages. Warnings and errors are always shown."
+      },
+      "mqttEnabled": {
+        "title": "Enable MQTT",
+        "type": "boolean",
+        "default": false,
+        "description": "Publish all Healthbox sensor data to a local MQTT broker after each refresh."
+      },
+      "mqttBroker": {
+        "title": "MQTT Broker URL",
+        "type": "string",
+        "default": "mqtt://127.0.0.1:1883",
+        "description": "URL of your MQTT broker (e.g. mqtt://127.0.0.1:1883)."
+      },
+      "mqttUsername": {
+        "title": "MQTT Username",
+        "type": "string",
+        "description": "Optional username for MQTT authentication."
+      },
+      "mqttPassword": {
+        "title": "MQTT Password",
+        "type": "string",
+        "description": "Optional password for MQTT authentication."
+      },
+      "mqttTopicPrefix": {
+        "title": "MQTT Topic Prefix",
+        "type": "string",
+        "default": "home/healthbox",
+        "description": "Root topic prefix. All messages will be published under this prefix."
+      }
+    }
+  }
+}

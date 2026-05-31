@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Renson Healthbox 3</title>
+  <style>
+    /* ── Reset / base ─────────────────────────────────────────── */
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           font-size: 14px; color: var(--text-color, #333); background: transparent;
+           margin: 0; padding: 0 16px 24px; }
+
+    h5 { margin: 20px 0 8px; font-size: 13px; font-weight: 600;
+         text-transform: uppercase; letter-spacing: .04em;
+         color: var(--secondary-color, #888); }
+
+    label { display: block; margin-bottom: 4px; font-weight: 500; }
+    small  { display: block; margin-top: 2px; color: var(--secondary-color, #888); }
+
+    .form-group { margin-bottom: 14px; }
+
+    input[type="text"], input[type="number"], select {
+      width: 100%; padding: 7px 10px; border-radius: 6px; font-size: 14px;
+      border: 1px solid var(--border-color, #ccc);
+      background: var(--input-bg, #fff); color: var(--text-color, #333);
+    }
+    input[type="checkbox"] { width: 18px; height: 18px; margin-right: 8px;
+                              vertical-align: middle; cursor: pointer; }
+    .check-row { display: flex; align-items: center; }
+
+    /* ── Discover button ──────────────────────────────────────── */
+    #btnDiscover {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 16px; border-radius: 6px; border: none;
+      background: var(--primary-color, #007AFF); color: #fff;
+      font-size: 14px; font-weight: 500; cursor: pointer;
+      margin-bottom: 12px; transition: opacity .15s;
+    }
+    #btnDiscover:disabled { opacity: .5; cursor: not-allowed; }
+    #btnDiscover svg { flex-shrink: 0; }
+
+    #discoverStatus { margin-bottom: 12px; padding: 8px 12px; border-radius: 6px;
+                      display: none; font-size: 13px; }
+    #discoverStatus.ok  { background: #d4edda; color: #155724; display: block; }
+    #discoverStatus.err { background: #f8d7da; color: #721c24; display: block; }
+
+    /* ── Override table ───────────────────────────────────────── */
+    #overrideTable { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+    #overrideTable th { text-align: left; font-size: 12px; font-weight: 600;
+                        text-transform: uppercase; letter-spacing: .03em;
+                        color: var(--secondary-color, #888);
+                        padding: 4px 8px 6px; border-bottom: 1px solid var(--border-color, #ddd); }
+    #overrideTable td { padding: 4px 8px; vertical-align: top; }
+    #overrideTable td input, #overrideTable td select {
+      padding: 5px 8px; font-size: 13px;
+    }
+
+    .btn-icon { background: none; border: none; cursor: pointer; padding: 4px;
+                color: var(--danger-color, #dc3545); font-size: 16px; line-height: 1; }
+
+    #btnAddOverride {
+      font-size: 13px; padding: 5px 12px; border-radius: 5px;
+      border: 1px solid var(--border-color, #ccc);
+      background: transparent; color: var(--text-color, #333); cursor: pointer;
+    }
+
+    /* ── Save button ──────────────────────────────────────────── */
+    #btnSave {
+      display: block; width: 100%; margin-top: 24px; padding: 10px;
+      border-radius: 7px; border: none;
+      background: var(--primary-color, #007AFF); color: #fff;
+      font-size: 15px; font-weight: 600; cursor: pointer; transition: opacity .15s;
+    }
+    #btnSave:disabled { opacity: .5; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════ CONNEXION ═════════════════════════════ -->
+<h5>Connexion</h5>
+
+<div class="form-group">
+  <label for="host">Adresse IP / Hostname</label>
+  <input type="text" id="host" placeholder="192.168.x.x" />
+  <small>Adresse de la Healthbox sur votre réseau local. Recommandé.</small>
+</div>
+
+
+<div class="form-group">
+  <label for="apiKey">Clé API avancée</label>
+  <input type="text" id="apiKey" placeholder="Votre clé Renson" />
+  <small>Active les métriques électriques du ventilateur (puissance, pression, RPM, tension).</small>
+</div>
+
+<!-- ═══════════════════════════ DÉCOUVERTE ════════════════════════════ -->
+<h5>Pièces</h5>
+
+<button id="btnDiscover" type="button">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+  </svg>
+  Découvrir les pièces
+</button>
+<div id="discoverStatus"></div>
+
+<!-- ═══════════════════════════ SONDAGES ═════════════════════════════ -->
+<h5>Rafraîchissement</h5>
+
+<div class="form-group">
+  <label for="pollInterval">Intervalle de sondage (secondes)</label>
+  <input type="number" id="pollInterval" min="5" value="30" />
+</div>
+
+<div class="form-group">
+  <label for="requestTimeout">Timeout HTTP (secondes)</label>
+  <input type="number" id="requestTimeout" min="1" value="10" />
+</div>
+
+<!-- ═══════════════════════════ FONCTIONS ════════════════════════════ -->
+<h5>Fonctionnalités</h5>
+
+<div class="form-group">
+  <label class="check-row">
+    <input type="checkbox" id="enableProfileControl" />
+    Contrôle du profil de ventilation (eco / health / intense)
+  </label>
+</div>
+
+<div class="form-group">
+  <label class="check-row">
+    <input type="checkbox" id="enableBoostControl" />
+    Contrôle du boost (interrupteur par pièce)
+  </label>
+</div>
+
+<div class="form-group" id="boostFields" style="display:none;">
+  <div class="form-group">
+    <label for="boostFanSpeed">Niveau de boost (%)</label>
+    <input type="number" id="boostFanSpeed" min="10" max="200" value="100" />
+  </div>
+  <div class="form-group">
+    <label for="boostDuration">Durée du boost (secondes)</label>
+    <input type="number" id="boostDuration" min="300" max="86400" value="600" />
+  </div>
+</div>
+
+<!-- ═══════════════════════════ MQTT ════════════════════════════════ -->
+<h5>MQTT</h5>
+
+<div class="form-group">
+  <label class="check-row">
+    <input type="checkbox" id="mqttEnabled" />
+    Publier les données vers le broker MQTT
+  </label>
+</div>
+
+<div id="mqttFields" style="display:none;">
+  <div class="form-group">
+    <label for="mqttBroker">URL du broker</label>
+    <input type="text" id="mqttBroker" placeholder="mqtt://127.0.0.1:1883" />
+  </div>
+  <div class="form-group">
+    <label for="mqttTopicPrefix">Préfixe des topics</label>
+    <input type="text" id="mqttTopicPrefix" placeholder="home/healthbox" />
+    <small>Ex : <code>home/healthbox/room/1/temperature</code></small>
+  </div>
+  <div class="form-group">
+    <label for="mqttUsername">Utilisateur (optionnel)</label>
+    <input type="text" id="mqttUsername" placeholder="mqtt" />
+  </div>
+  <div class="form-group">
+    <label for="mqttPassword">Mot de passe (optionnel)</label>
+    <input type="text" id="mqttPassword" placeholder="" />
+  </div>
+</div>
+
+<!-- ═══════════════════════════ OVERRIDES ════════════════════════════ -->
+<div id="overrideSection" style="display:none;">
+  <h5>Réglages par pièce <span style="font-weight:400;text-transform:none;letter-spacing:0;">(optionnels)</span></h5>
+
+  <table id="overrideTable">
+    <thead>
+      <tr>
+        <th>Pièce</th>
+        <th>Boost %</th>
+        <th>Durée (s)</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="overrideTbody"></tbody>
+  </table>
+  <button id="btnAddOverride" type="button">+ Ajouter</button>
+</div>
+
+<div class="form-group">
+  <label class="check-row">
+    <input type="checkbox" id="disableLogging" />
+    Désactiver les messages de log info/debug
+  </label>
+</div>
+
+<!-- ═══════════════════════════ SAUVEGARDE ═══════════════════════════ -->
+<button id="btnSave" type="button">Enregistrer</button>
+
+<script>
+/* ------------------------------------------------------------------ */
+/* Helpers                                                              */
+/* ------------------------------------------------------------------ */
+let discoveredRooms = [];   // [{id, name, type}]
+
+function int(v)  { const n = parseInt(v, 10);  return isNaN(n) ? undefined : n; }
+function str(v)  { const s = String(v ?? "").trim(); return s || undefined; }
+function bool(v) { return v === true; }
+
+/* ------------------------------------------------------------------ */
+/* DOM refs                                                             */
+/* ------------------------------------------------------------------ */
+const $ = (id) => document.getElementById(id);
+
+const elHost             = $("host");
+const elApiKey           = $("apiKey");
+const elPoll             = $("pollInterval");
+const elTimeout          = $("requestTimeout");
+const elBoost            = $("enableBoostControl");
+const elBoostFields      = $("boostFields");
+const elBoostSpeed       = $("boostFanSpeed");
+const elBoostDur         = $("boostDuration");
+const elProfile          = $("enableProfileControl");
+const elDisableLog       = $("disableLogging");
+const elMqttEnabled      = $("mqttEnabled");
+const elMqttFields       = $("mqttFields");
+const elMqttBroker       = $("mqttBroker");
+const elMqttPrefix       = $("mqttTopicPrefix");
+const elMqttUser         = $("mqttUsername");
+const elMqttPass         = $("mqttPassword");
+const elOverrideSection  = $("overrideSection");
+const elTbody            = $("overrideTbody");
+const elStatus           = $("discoverStatus");
+const btnDiscover        = $("btnDiscover");
+const btnAddOverride     = $("btnAddOverride");
+const btnSave            = $("btnSave");
+
+/* ------------------------------------------------------------------ */
+/* Show/hide boost fields                                               */
+/* ------------------------------------------------------------------ */
+elMqttEnabled.addEventListener("change", () => {
+  elMqttFields.style.display = elMqttEnabled.checked ? "" : "none";
+});
+
+function syncBoostVisibility() {
+  const on = elBoost.checked;
+  elBoostFields.style.display     = on ? "" : "none";
+  elOverrideSection.style.display = on ? "" : "none";
+}
+elBoost.addEventListener("change", syncBoostVisibility);
+
+/* ------------------------------------------------------------------ */
+/* Room selector cell                                                   */
+/* ------------------------------------------------------------------ */
+function buildRoomCell(selectedId) {
+  if (discoveredRooms.length) {
+    const sel = document.createElement("select");
+    const blank = document.createElement("option");
+    blank.value = ""; blank.textContent = "— choisir —";
+    sel.appendChild(blank);
+    discoveredRooms.forEach(r => {
+      const opt = document.createElement("option");
+      opt.value = r.id;
+      opt.textContent = `${r.id} – ${r.name}${r.type ? " (" + r.type + ")" : ""}`;
+      if (r.id === selectedId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.dataset.roomField = "1";
+    return sel;
+  } else {
+    const inp = document.createElement("input");
+    inp.type = "text"; inp.placeholder = "ID pièce (ex: 1)";
+    inp.value = selectedId || "";
+    inp.dataset.roomField = "1";
+    return inp;
+  }
+}
+
+function addOverrideRow(room, boostLevel, boostDuration) {
+  const tr = document.createElement("tr");
+
+  // Room cell
+  const tdRoom = document.createElement("td");
+  tdRoom.appendChild(buildRoomCell(room));
+  tr.appendChild(tdRoom);
+
+  // boostLevel cell
+  const tdLevel = document.createElement("td");
+  const inpLevel = document.createElement("input");
+  inpLevel.type = "number"; inpLevel.min = 10; inpLevel.max = 200;
+  inpLevel.placeholder = "Global";
+  inpLevel.dataset.boostLevel = "1";
+  if (boostLevel != null) inpLevel.value = boostLevel;
+  tdLevel.appendChild(inpLevel);
+  tr.appendChild(tdLevel);
+
+  // boostDuration cell
+  const tdDur = document.createElement("td");
+  const inpDur = document.createElement("input");
+  inpDur.type = "number"; inpDur.min = 300; inpDur.max = 86400;
+  inpDur.placeholder = "Global";
+  inpDur.dataset.boostDuration = "1";
+  if (boostDuration != null) inpDur.value = boostDuration;
+  tdDur.appendChild(inpDur);
+  tr.appendChild(tdDur);
+
+  // Remove button
+  const tdDel = document.createElement("td");
+  const btnDel = document.createElement("button");
+  btnDel.className = "btn-icon"; btnDel.type = "button"; btnDel.textContent = "×";
+  btnDel.title = "Supprimer";
+  btnDel.addEventListener("click", () => tr.remove());
+  tdDel.appendChild(btnDel);
+  tr.appendChild(tdDel);
+
+  elTbody.appendChild(tr);
+}
+
+/* Replace all room selectors after discovery */
+function refreshRoomCells() {
+  elTbody.querySelectorAll("tr").forEach(tr => {
+    const existing = tr.querySelector("[data-room-field]");
+    if (!existing) return;
+    const currentVal = existing.value;
+    const newCell = buildRoomCell(currentVal);
+    existing.replaceWith(newCell);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Read all override rows                                               */
+/* ------------------------------------------------------------------ */
+function readOverrides() {
+  const rows = [];
+  elTbody.querySelectorAll("tr").forEach(tr => {
+    const roomEl  = tr.querySelector("[data-room-field]");
+    const levelEl = tr.querySelector("[data-boost-level]");
+    const durEl   = tr.querySelector("[data-boost-duration]");
+
+    const roomId = str(roomEl?.value);
+    if (!roomId) return;  // skip empty rows
+
+    const entry = { room: roomId };
+    const level = int(levelEl?.value);
+    const dur   = int(durEl?.value);
+    if (level != null) entry.boostLevel = level;
+    if (dur   != null) entry.boostDuration = dur;
+    rows.push(entry);
+  });
+  return rows;
+}
+
+/* ------------------------------------------------------------------ */
+/* Discover rooms (shared by auto-load + manual button)                  */
+/* ------------------------------------------------------------------ */
+async function discoverRooms({ silent = false } = {}) {
+  if (!silent) {
+    elStatus.className = "";
+    elStatus.style.display = "none";
+    elStatus.textContent = "";
+    btnDiscover.disabled = true;
+    btnDiscover.textContent = "Recherche en cours…";
+  }
+
+  try {
+    const result = await window.homebridge.request("/discover-rooms", {
+      host: str(elHost.value),
+    });
+    discoveredRooms = result.rooms || [];
+    refreshRoomCells();
+
+    if (!silent) {
+      elStatus.className = "ok";
+      elStatus.textContent = `✓ ${discoveredRooms.length} pièce(s) trouvée(s) : `
+        + discoveredRooms.map(r => `${r.name} (${r.id})`).join(", ");
+    }
+  } catch (err) {
+    if (!silent) {
+      elStatus.className = "err";
+      elStatus.textContent = `Erreur : ${err.message || err}`;
+    }
+  } finally {
+    if (!silent) {
+      btnDiscover.disabled = false;
+      btnDiscover.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        Découvrir les pièces`;
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Load config from Homebridge                                          */
+/* ------------------------------------------------------------------ */
+async function loadConfig() {
+  const configs = await window.homebridge.getPluginConfig();
+  const cfg = configs[0] || {};
+
+  elHost.value        = cfg.host          ?? "";
+  elApiKey.value      = cfg.apiKey        ?? "";
+  elPoll.value        = cfg.pollInterval  ?? 30;
+  elTimeout.value     = cfg.requestTimeout ?? 10;
+  elBoost.checked     = cfg.enableBoostControl  ?? false;
+  elProfile.checked   = cfg.enableProfileControl ?? false;
+  elDisableLog.checked= cfg.disableLogging ?? false;
+  elBoostSpeed.value  = cfg.boostFanSpeed  ?? 100;
+  elBoostDur.value    = cfg.boostDuration  ?? 600;
+  syncBoostVisibility();
+
+  elMqttEnabled.checked  = cfg.mqttEnabled ?? false;
+  elMqttBroker.value     = cfg.mqttBroker  ?? "mqtt://127.0.0.1:1883";
+  elMqttPrefix.value     = cfg.mqttTopicPrefix ?? "home/healthbox";
+  elMqttUser.value       = cfg.mqttUsername ?? "";
+  elMqttPass.value       = cfg.mqttPassword ?? "";
+  elMqttFields.style.display = elMqttEnabled.checked ? "" : "none";
+
+  // Auto-discover rooms silently so override rows render as dropdowns from the start
+  if (elHost.value) {
+    await discoverRooms({ silent: true });
+  }
+
+  elTbody.innerHTML = "";
+  (cfg.roomBoostOverrides || []).forEach(o =>
+    addOverrideRow(o.room, o.boostLevel, o.boostDuration)
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Build config object from form                                        */
+/* ------------------------------------------------------------------ */
+function buildConfig() {
+  const cfg = { platform: "HealthBoxHomebridgePlugin" };
+
+  const host  = str(elHost.value);
+  const key   = str(elApiKey.value);
+  const poll  = int(elPoll.value);
+  const tout  = int(elTimeout.value);
+
+  if (host)  cfg.host           = host;
+  if (key)   cfg.apiKey         = key;
+  if (poll)  cfg.pollInterval   = poll;
+  if (tout)  cfg.requestTimeout = tout;
+
+  cfg.enableBoostControl   = bool(elBoost.checked);
+  cfg.enableProfileControl = bool(elProfile.checked);
+  cfg.disableLogging       = bool(elDisableLog.checked);
+
+  cfg.mqttEnabled = bool(elMqttEnabled.checked);
+  if (elMqttEnabled.checked) {
+    const broker = str(elMqttBroker.value);
+    const prefix = str(elMqttPrefix.value);
+    const user   = str(elMqttUser.value);
+    const pass   = str(elMqttPass.value);
+    if (broker) cfg.mqttBroker       = broker;
+    if (prefix) cfg.mqttTopicPrefix  = prefix;
+    if (user)   cfg.mqttUsername     = user;
+    if (pass)   cfg.mqttPassword     = pass;
+  }
+
+  if (elBoost.checked) {
+    const spd = int(elBoostSpeed.value);
+    const dur = int(elBoostDur.value);
+    if (spd) cfg.boostFanSpeed = spd;
+    if (dur) cfg.boostDuration = dur;
+  }
+
+  const overrides = readOverrides();
+  if (overrides.length) cfg.roomBoostOverrides = overrides;
+
+  return cfg;
+}
+
+/* ------------------------------------------------------------------ */
+/* Discover rooms (manual button)                                        */
+/* ------------------------------------------------------------------ */
+btnDiscover.addEventListener("click", () => discoverRooms());
+
+/* ------------------------------------------------------------------ */
+/* Add override row                                                      */
+/* ------------------------------------------------------------------ */
+btnAddOverride.addEventListener("click", async () => {
+  if (!discoveredRooms.length && str(elHost.value)) {
+    await discoverRooms();  // non-silent: montre le feedback si la VMC n'a pas encore été interrogée
+  }
+  addOverrideRow();
+});
+
+/* ------------------------------------------------------------------ */
+/* Save                                                                 */
+/* ------------------------------------------------------------------ */
+btnSave.addEventListener("click", async () => {
+  btnSave.disabled = true;
+  btnSave.textContent = "Enregistrement…";
+  try {
+    const cfg = buildConfig();
+    await window.homebridge.updatePluginConfig([cfg]);
+    await window.homebridge.savePluginConfig();
+    btnSave.textContent = "✓ Enregistré";
+    setTimeout(() => { btnSave.textContent = "Enregistrer"; btnSave.disabled = false; }, 2000);
+  } catch (err) {
+    alert("Erreur lors de l'enregistrement : " + (err.message || err));
+    btnSave.textContent = "Enregistrer";
+    btnSave.disabled = false;
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Init                                                                  */
+/* ------------------------------------------------------------------ */
+syncBoostVisibility();
+loadConfig();
+
+// Re-discover rooms silently si l'adresse IP est modifiée
+elHost.addEventListener("change", () => {
+  if (str(elHost.value)) discoverRooms({ silent: true });
+});
+</script>
+</body>
+</html>
