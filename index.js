@@ -14,6 +14,14 @@ const BOOST_LEVEL_MAX = 200;
 const BOOST_DURATION_MIN = 300;
 const BOOST_DURATION_MAX = 86400;
 
+// Tiered polling cadences (ms). The fast loop (every pollInterval) only hits the
+// two endpoints that actually change: /v2/api/data/current (all room sensors /
+// IAQ / flows / profiles) and /v2/device/fan (central fan). Everything else is
+// quasi-static and polled far less often, which cuts ~9 calls/cycle down to ~2.
+const STATIC_REFRESH_MS = 30 * 60 * 1000; // firmware + wifi: ~never change
+const ERROR_POLL_MS = 5 * 60 * 1000;      // device error list: rare
+const BOOST_SWEEP_MS = 60 * 1000;         // sweep all rooms to catch app/manual boosts
+
 // Profile speed positions used by the profile fan accessory.
 // eco=33%, health=67%, intense=100% — spans the slider into 3 equal thirds.
 const PROFILE_SPEEDS = { eco: 33, health: 67, intense: 100 };
@@ -38,6 +46,18 @@ class HealthboxPlatform {
     this.refreshing = false;
     this.pollTimer = null;
     this.advancedEnabled = false;
+
+    // Tiered-polling state. boostWatch = rooms with an active boost we must poll
+    // every cycle; boostCache = last full boost object per room (so idle rooms
+    // keep their real level instead of being re-fetched each cycle).
+    this.boostWatch = new Set();
+    this.boostCache = new Map();
+    this.cachedCore = null;
+    this.cachedWifi = null;
+    this.cachedErrors = [];
+    this.lastStaticFetch = 0;
+    this.lastErrorPoll = 0;
+    this.lastBoostSweep = 0;
     this.platformName = this.config.platform || PLATFORM_ALIASES[0];
     this.mqttClient = null;
 
@@ -1184,32 +1204,102 @@ class HealthboxPlatform {
     this.refreshing = true;
 
     try {
+      const now = Date.now();
+
+      // --- Fast loop: the only two endpoints whose data actually changes ---
       const baseData = await this.requestJson("GET", "/v2/api/data/current");
       const roomIds = Object.keys(baseData.room || {});
+      const fan = await this.safeRequest("GET", "/v2/device/fan");
 
-      const [fan, wifi, errors, coreData, boosts] = await Promise.all([
-        this.safeRequest("GET", "/v2/device/fan"),
-        this.safeRequest("GET", "/renson_core/v1/wifi/client/status"),
-        this.safeRequest("GET", "/v2/device/error"),
-        this.safeRequest("GET", "/renson_core/v2/global"),
-        Promise.all(
-          roomIds.map(async (roomId) => [roomId, await this.fetchRoomBoost(roomId)])
-        ),
-      ]);
+      // --- Quasi-static: firmware + wifi (once, then every STATIC_REFRESH_MS) ---
+      if (now - this.lastStaticFetch >= STATIC_REFRESH_MS) {
+        const [coreData, wifi] = await Promise.all([
+          this.safeRequest("GET", "/renson_core/v2/global"),
+          this.safeRequest("GET", "/renson_core/v1/wifi/client/status"),
+        ]);
+        if (coreData) this.cachedCore = coreData;
+        if (wifi) this.cachedWifi = wifi;
+        this.lastStaticFetch = now;
+      }
+
+      // --- Error list: every ERROR_POLL_MS ---
+      if (now - this.lastErrorPoll >= ERROR_POLL_MS) {
+        const errors = await this.safeRequest("GET", "/v2/device/error");
+        this.cachedErrors = Array.isArray(errors) ? errors : [];
+        this.lastErrorPoll = now;
+      }
+
+      // --- Boost: sweep all rooms periodically, else only active ones ---
+      await this.refreshBoosts(roomIds, now);
 
       await this.syncAccessories({
         baseData,
         fan,
-        wifi,
-        errors: Array.isArray(errors) ? errors : [],
-        coreData,
-        boosts: new Map(boosts),
+        wifi: this.cachedWifi,
+        errors: this.cachedErrors,
+        coreData: this.cachedCore,
+        boosts: this.collectBoosts(roomIds),
       });
     } catch (error) {
       this.log.error(`Failed to refresh data: ${error.message || error}`);
     } finally {
       this.refreshing = false;
     }
+  }
+
+  // Poll boost endpoints intelligently. A full sweep (all rooms) runs at most
+  // every BOOST_SWEEP_MS to catch boosts started from the Renson app or the
+  // physical button; between sweeps we only poll rooms we know are boosting.
+  async refreshBoosts(roomIds, now) {
+    const sweepDue = now - this.lastBoostSweep >= BOOST_SWEEP_MS;
+    const targets = sweepDue ? roomIds : [...this.boostWatch];
+
+    if (sweepDue) {
+      this.lastBoostSweep = now;
+    }
+    if (targets.length === 0) {
+      return;
+    }
+
+    await Promise.all(
+      targets.map(async (roomId) => {
+        const boost = await this.fetchRoomBoost(roomId);
+        if (boost) {
+          this.boostCache.set(roomId, boost);
+          this.updateBoostWatch(roomId, boost);
+        }
+      })
+    );
+  }
+
+  // Keep/drop a room in the active-boost watch set from its latest reading.
+  updateBoostWatch(roomId, boost) {
+    const active =
+      boost &&
+      (boost.enabled === true ||
+        (typeof boost.remaining === "number" && boost.remaining > 0));
+    if (active) {
+      this.boostWatch.add(roomId);
+    } else {
+      this.boostWatch.delete(roomId);
+    }
+  }
+
+  // Build the per-room boost map syncAccessories expects, from cache. A room with
+  // no reading yet (before the first sweep) falls back to an inactive placeholder.
+  collectBoosts(roomIds) {
+    const boosts = new Map();
+    for (const roomId of roomIds) {
+      boosts.set(
+        roomId,
+        this.boostCache.get(roomId) || {
+          level: null,
+          enabled: false,
+          remaining: 0,
+        }
+      );
+    }
+    return boosts;
   }
 
   async syncAccessories(state) {
@@ -1977,6 +2067,11 @@ class HealthboxPlatform {
             `Failed to set boost for room ${roomId}: ${error.message || error}`
           );
           return;
+        }
+        // Watch this room immediately so the countdown is polled every cycle
+        // without waiting for the next full sweep.
+        if (enabled) {
+          this.boostWatch.add(roomId);
         }
         await this.sleep(1500);
         void this.refreshData();

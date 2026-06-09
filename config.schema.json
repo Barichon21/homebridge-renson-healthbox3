@@ -2,6 +2,8 @@
   "pluginAlias": "HealthBoxHomebridgePlugin",
   "pluginType": "platform",
   "singular": true,
+  "headerDisplay": "Renson Healthbox 3 — exposes room air-quality sensors, ventilation rates, fan metrics, boost and profile control to HomeKit. Connects to the unit's **local API** (no cloud).",
+  "footerDisplay": "For help, see the [README](https://github.com/barichon21/homebridge-renson-healthbox3#readme).",
   "schema": {
     "type": "object",
     "properties": {

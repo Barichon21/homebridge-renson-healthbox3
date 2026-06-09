@@ -1,3 +1,6 @@
 node_modules/
 .DS_Store
 *.backup*
+*.tgz
+index.js.bak_*
+package-lock.json
