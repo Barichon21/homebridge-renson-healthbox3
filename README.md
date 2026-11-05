@@ -107,3 +107,50 @@ The global fan accessory exposes:
 ## License
 
 MIT © barichon21
+
+
+## Reliability and data interpretation
+
+- A failed or incomplete reading keeps existing accessory UUIDs. Unavailable
+  values return a HomeKit communication error instead of fabricated zeros.
+  Removed rooms are retained as unavailable; remove obsolete accessories only
+  after confirming an intentional device change, using the Homebridge UI tools
+  with a complete backup. Explicitly disabling a control still removes its
+  corresponding accessory.
+- Both object-keyed rooms and arrays with explicit room IDs are normalized by
+  the runtime and discovery UI. Existing object-keyed UUIDs are preserved.
+- `airQualityScale` accepts `unknown` (default), `index` (continuous 0–100,
+  lower is better) or `categories` (1 excellent through 5 poor). Choose the
+  scale documented for the device; the plugin no longer guesses it from an
+  individual reading. Without a confirmed scale, standard HomeKit air quality
+  is UNKNOWN while the raw index remains available in custom metrics.
+- VOC raw values retain their original custom characteristic UUID but are now
+  labelled **VOC Raw Value**, with no invented ppm label. Standard VOCDensity
+  is populated only for explicit µg/m³ or mg/m³ units; ppm/ppb are not converted
+  without a known compound. Unknown or out-of-range density is unavailable.
+- HTTP requests and settling timers are cancelled at shutdown. Boost/profile
+  failures reach HomeKit. Writes still await the actual HTTP response; a slow
+  device may still trigger a Homebridge warning. Run the plugin in a child bridge.
+- Invalid MQTT settings do not prevent HomeKit monitoring. MQTT status `down`
+  indicates failed primary polling; `up` indicates successful primary sync.
+  Consumers of retained readings must consider this status. An individual
+  missing metric may retain its previous MQTT value; no new zero is published.
+- Unique room-name MQTT topics are preserved. Names that normalize to the same
+  topic gain a suffix containing the room ID encoded as hexadecimal. Renaming
+  a room changes its topics; old retained topics must be cleared explicitly in
+  the broker if no longer needed. Never run two instances for the same unit
+  against the same MQTT prefix.
+- One Healthbox is supported per plugin configuration/child bridge. This change
+  intentionally does not introduce device-specific UUIDs, which would break
+  existing HomeKit identities. Keep multiple units in separate child bridges.
+- The configuration form preserves child-bridge settings and can explicitly
+  clear API credentials and per-room overrides. Keep a full backup before edits.
+
+## Development validation
+
+Run `npm ci --ignore-scripts` and `npm test`. Automated tests use synthetic data,
+real Homebridge/HAP objects, an emulated browser DOM and local HTTP/MQTT protocol
+simulators. They do not contact Renson hardware. CI covers Node.js 22, 24 and 26
+with Homebridge 2.5.0. The retained Node 20/Homebridge 1.x engine ranges are not
+covered by this matrix. `npm audit --omit=dev` checks production dependencies;
+it does not establish exploitability or prove the absence of security flaws.

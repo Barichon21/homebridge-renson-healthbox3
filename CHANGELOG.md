@@ -4,6 +4,35 @@ All notable changes to this plugin are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Reliability audit
+- Retain accessory identities through transient failures and mark readings unavailable.
+- Reattach commands to recreated service objects; propagate profile write failures.
+- Reject missing/non-numeric readings instead of reporting false zeros.
+- Normalize object, array and nested room inventories in one shared module.
+- Require an explicit AQI scale; preserve raw VOC without guessed units.
+- Preserve known errors after failed reads and retry static reads after failures.
+- Fix configuration clearing, legacy fields, discovery races and numeric validation.
+- Isolate MQTT initialization failures, redact URL credentials, disambiguate room topics,
+  and allow graceful QoS 1 shutdown; cancel HTTP requests and settling timers on shutdown.
+- Update ip-address to 10.7.6 in the lockfile; add a Node 22/24/26 CI matrix.
+- Expand validation to 37 automated tests including DOM and local MQTT simulation.
+
+### Changed
+- Include Node.js 26 in the supported engine range.
+- Regenerate the stale dependency lockfile and test against Homebridge 2.5.0.
+
+### Fixed
+- Stop polling on shutdown, including shutdown during initialization.
+- Keep the room discovery timeout active through JSON body reading and always clear its timer.
+- Complete Boost writes after the device request without an additional 1.5-second wait.
+- Report failed Boost writes to HomeKit as communication errors.
+
+### Tests
+- Add simulated compatibility tests for registration, HAP accessories, HTTP requests,
+  timeouts, shutdown, polling cadence and Boost write handling.
+
 ## [1.1.0] - 2026-06-09
 
 ### Changed

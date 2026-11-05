@@ -1,6 +1,7 @@
 "use strict";
 
 const { HomebridgePluginUiServer } = require("@homebridge/plugin-ui-utils");
+const { endpointUrl, normalizeRooms } = require("../lib/api-data");
 
 class HealthboxUiServer extends HomebridgePluginUiServer {
   constructor() {
@@ -12,55 +13,36 @@ class HealthboxUiServer extends HomebridgePluginUiServer {
   async discoverRooms(payload) {
     const { host, healthBoxUri } = payload || {};
 
-    // Build base URL from either field
-    let baseUrl = "";
-    if (host) {
-      const trimmed = host.trim();
-      baseUrl = trimmed.startsWith("http") ? trimmed.replace(/\/$/, "") : `http://${trimmed}`;
-    } else if (healthBoxUri) {
-      baseUrl = healthBoxUri.trim().replace(/\/$/, "");
-    }
-
-    if (!baseUrl) {
-      throw new Error("Aucune adresse Healthbox fournie (host ou healthBoxUri requis).");
-    }
+    const baseUrl = endpointUrl(host || healthBoxUri);
 
     const url = `${baseUrl}/v2/api/data/current`;
 
     // Node's built-in fetch (Node ≥18) is available in the Homebridge environment
-    let response;
+    let data;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 8000);
-      response = await fetch(url, { signal: ctrl.signal });
-      clearTimeout(timer);
+      const response = await fetch(url, { signal: ctrl.signal });
+      if (!response.ok) {
+        throw new Error(`L'API Healthbox a répondu ${response.status} ${response.statusText}`);
+      }
+      try {
+        data = await response.json();
+      } catch (err) {
+        if (err.name === "AbortError") throw err;
+        throw new Error("La réponse de la Healthbox n'est pas du JSON valide.");
+      }
     } catch (err) {
       if (err.name === "AbortError") {
         throw new Error(`Timeout : impossible de joindre ${baseUrl} en 8 secondes.`);
       }
-      throw new Error(`Erreur réseau : ${err.message}`);
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
 
-    if (!response.ok) {
-      throw new Error(`L'API Healthbox a répondu ${response.status} ${response.statusText}`);
-    }
-
-    let data;
-    try {
-      data = await response.json();
-    } catch {
-      throw new Error("La réponse de la Healthbox n'est pas du JSON valide.");
-    }
-
-    // Accept both { room: [...] } and { home: { room: [...] } } layouts
-    const roomList =
-      (Array.isArray(data.room) && data.room) ||
-      (data.home && Array.isArray(data.home.room) && data.home.room) ||
-      [];
-
-    if (!roomList.length) {
-      throw new Error("Aucune pièce trouvée dans la réponse de la Healthbox.");
-    }
+    const roomList = Object.values(normalizeRooms(data));
+    if (!roomList.length) throw new Error("Aucune pièce trouvée dans la réponse de la Healthbox.");
 
     // Strip emoji from names (same logic as the main plugin)
     const sanitize = (str) =>

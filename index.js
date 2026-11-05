@@ -1,4 +1,4 @@
-const { URL } = require("url");
+const { numberOrNull, endpointUrl, normalizeData, vocDensity } = require("./lib/api-data");
 const mqtt = require("mqtt");
 
 const PLUGIN_NAME = "homebridge-renson-healthbox3";
@@ -35,16 +35,24 @@ module.exports = (api) => {
 class HealthboxPlatform {
   constructor(log, config, api) {
     this.config = config || {};
+    this.airQualityScale = ["index", "categories"].includes(this.config.airQualityScale) ? this.config.airQualityScale : "unknown";
     this.log = this.wrapLog(log, Boolean(this.config.disableLogging));
     this.api = api;
     this.hap = api.hap;
     this.customTypes = this.createCustomTypes();
     this.accessories = new Map();
-    this.boostHandlersAttached = new Set();
-    this.profileHandlersAttached = new Set();
+    this.boostHandlersAttached = new WeakSet();
+    this.profileHandlersAttached = new WeakSet();
     this.accessoriesToForceUpdate = [];
     this.refreshing = false;
     this.pollTimer = null;
+    this.stopped = false;
+    this.requestControllers = new Set();
+    this.pendingSleeps = new Map();
+    this.initializing = null;
+    this.lastErrorsSuccess = 0;
+    this.lastSyncSuccess = 0;
+    this.staticRetryAt = 0;
     this.advancedEnabled = false;
 
     // Tiered-polling state. boostWatch = rooms with an active boost we must poll
@@ -87,10 +95,22 @@ class HealthboxPlatform {
       }
       if (!this.baseUrl) return;
       this.log.info(`Starting Healthbox monitoring for ${this.baseUrl}`);
-      void this.initialize();
+      void this.initialize().catch((error) => {
+        this.log.error(`Initialization failed: ${error.message || error}`);
+        this.markUnavailable();
+      });
     });
 
     this.api.on("shutdown", () => {
+      this.stopped = true;
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+      for (const controller of this.requestControllers) controller.abort();
+      for (const [timer, resolve] of this.pendingSleeps) {
+        clearTimeout(timer);
+        resolve();
+      }
+      this.pendingSleeps.clear();
       this.mqttShutdown();
     });
 
@@ -188,15 +208,10 @@ class HealthboxPlatform {
 
     let parsed;
     try {
-      parsed = rawEndpoint.startsWith("http://") ||
-        rawEndpoint.startsWith("https://")
-        ? new URL(rawEndpoint)
-        : new URL(`http://${rawEndpoint}`);
+      parsed = new URL(endpointUrl(rawEndpoint));
     } catch (error) {
       this.log.warn(
-        `Invalid Healthbox endpoint "${rawEndpoint}": ${
-          error.message || error
-        }`
+        "Invalid Healthbox endpoint. Use an HTTP(S) address without credentials."
       );
       return {
         name: config.name || DEFAULT_NAME,
@@ -258,7 +273,7 @@ class HealthboxPlatform {
       mqttBroker: config.mqttBroker || "mqtt://127.0.0.1:1883",
       mqttUsername: config.mqttUsername || null,
       mqttPassword: config.mqttPassword || null,
-      mqttTopicPrefix: (config.mqttTopicPrefix || "home/healthbox").replace(/\/$/, ""),
+      mqttTopicPrefix: (typeof config.mqttTopicPrefix === "string" && config.mqttTopicPrefix.trim() ? config.mqttTopicPrefix.trim() : "home/healthbox").replace(/\/+$/, ""),
     };
   }
 
@@ -388,7 +403,7 @@ class HealthboxPlatform {
     });
 
     const VocLevelPpm = createFloatCharacteristic({
-      displayName: "VOC Level (ppm)",
+      displayName: "VOC Raw Value",
       uuid: "D6E00011-8C61-4E84-BE8C-0E9E23D5A001",
       maxValue: 1000000,
       minStep: 0.01,
@@ -498,8 +513,8 @@ class HealthboxPlatform {
   }
 
   clampInt(value, min, max, fallback) {
-    const number = Number(value);
-    if (!Number.isFinite(number)) {
+    const number = this.numberOrNull(value);
+    if (number === null) {
       return fallback;
     }
 
@@ -507,8 +522,7 @@ class HealthboxPlatform {
   }
 
   numberOrNull(value) {
-    const number = Number(value);
-    return Number.isFinite(number) ? number : null;
+    return numberOrNull(value);
   }
 
   clampNumber(value, min, max) {
@@ -562,6 +576,7 @@ class HealthboxPlatform {
   initMqtt() {
     if (!this.mqttEnabled) return;
 
+    if (!this.mqttTopicPrefix || /[+#\u0000]/.test(this.mqttTopicPrefix)) throw new Error("Invalid MQTT topic prefix.");
     const opts = {
       clientId: `homebridge-healthbox-${(this.host || "unknown").replace(/[^a-z0-9]/gi, "-")}`,
       reconnectPeriod: 5000,
@@ -576,15 +591,23 @@ class HealthboxPlatform {
     if (this.mqttUsername) opts.username = this.mqttUsername;
     if (this.mqttPassword) opts.password = this.mqttPassword;
 
-    this.mqttClient = mqtt.connect(this.mqttBroker, opts);
+    const broker = new URL(this.mqttBroker);
+    if (!["mqtt:", "mqtts:", "ws:", "wss:"].includes(broker.protocol) || !broker.hostname) {
+      throw new Error("Invalid MQTT broker URL or protocol.");
+    }
+    const client = mqtt.connect(this.mqttBroker, opts);
+    this.mqttClient = client;
 
     this.mqttClient.on("connect", () => {
-      this.log.info(`MQTT connecté à ${this.mqttBroker} (préfixe: ${this.mqttTopicPrefix})`);
-      this.mqttClient.publish(`${this.mqttTopicPrefix}/status`, "up", { retain: true, qos: 1 });
+      if (this.stopped || this.mqttClient !== client) return;
+      this.log.info(`MQTT connecté à ${broker.protocol}//${broker.host} (préfixe: ${this.mqttTopicPrefix})`);
+      const healthy = this.lastSyncSuccess && Date.now() - this.lastSyncSuccess < this.pollInterval * 2000 + this.requestTimeout * 1000;
+      client.publish(`${this.mqttTopicPrefix}/status`, healthy ? "up" : "down", { retain: true, qos: 1 });
     });
 
     this.mqttClient.on("error", (err) => {
-      this.log.warn(`MQTT erreur : ${err.message || err}`);
+      const message = String(err.message || err).replace(/([a-z]+:\/\/)[^@\s]+@/gi, "$1[redacted]@");
+      this.log.warn(`MQTT erreur : ${message}`);
     });
 
     this.mqttClient.on("offline", () => {
@@ -597,14 +620,27 @@ class HealthboxPlatform {
   }
 
   mqttShutdown() {
-    if (!this.mqttClient) return;
-    try {
-      this.mqttClient.publish(`${this.mqttTopicPrefix}/status`, "down", { retain: true, qos: 1 });
-      this.mqttClient.end(true);
-    } catch (_) {
-      // best-effort
-    }
+    const client = this.mqttClient;
     this.mqttClient = null;
+    if (!client) return;
+    // Bound the graceful close, but allow the retained QoS 1 status to be ACKed.
+    const timer = setTimeout(() => client.end(true), 1500);
+    timer.unref?.();
+    try {
+      if (!client.connected) {
+        clearTimeout(timer);
+        client.end(true);
+        return;
+      }
+      client.publish(`${this.mqttTopicPrefix}/status`, "down", { retain: true, qos: 1 }, () => {
+        clearTimeout(timer);
+        client.end(false);
+      });
+    } catch (error) {
+      clearTimeout(timer);
+      client.end(true);
+      this.log.debug(`MQTT shutdown failed: ${error.message || error}`);
+    }
   }
 
   // Slug pour les topics MQTT : underscores, minuscules.
@@ -630,7 +666,13 @@ class HealthboxPlatform {
     } else {
       payload = String(value);
     }
-    this.mqttClient.publish(`${this.mqttTopicPrefix}/${topic}`, payload, { retain: true });
+    try {
+      this.mqttClient.publish(`${this.mqttTopicPrefix}/${topic}`, payload, { retain: true }, (error) => {
+        if (error) this.log.debug("MQTT publication failed.");
+      });
+    } catch (error) {
+      this.log.debug("MQTT publication failed.");
+    }
   }
 
   publishAllToMqtt(state) {
@@ -686,12 +728,19 @@ class HealthboxPlatform {
     // Noms de métriques alignés sur l'ancien healthbox2mqtt.js :
     //   concentration (pas co2), index (pas aqi),
     //   boost_enable ON|OFF, boost_remaining (pas boost/remaining).
-    for (const [roomId, roomData] of Object.entries(state.baseData.room || {})) {
+    const roomEntries = Object.entries(state.baseData.room || {});
+    const topicCounts = new Map();
+    for (const [, data] of roomEntries) {
+      const slug = this.mqttSlug(this.sanitizeName(data.name));
+      topicCounts.set(slug, (topicCounts.get(slug) || 0) + 1);
+    }
+    for (const [roomId, roomData] of roomEntries) {
       const roomName =
         this.sanitizeName(this.truthyString(roomData.name) || `Room ${roomId}`) ||
         `Room ${roomId}`;
       const sensors = Array.isArray(roomData.sensor) ? roomData.sensor : [];
-      const p = this.mqttSlug(roomName);  // ex. "SDB Haut" → "sdb_haut"
+      const slug = this.mqttSlug(roomName);
+      const p = !slug || topicCounts.get(slug) > 1 ? `${slug || "room"}_${Buffer.from(roomId).toString("hex")}` : slug;
 
       // Capteurs environnementaux
       const temp = this.extractSensorValue(sensors, "indoor temperature", "temperature");
@@ -729,7 +778,7 @@ class HealthboxPlatform {
 
       // Boost — noms de métriques compatibles Telegraf
       const boost = state.boosts.get(roomId);
-      if (boost) {
+      if (boost && !boost.unknown) {
         this.mqttPub(`${p}/boost_enable`,    boost.enabled ? "ON" : "OFF");
         this.mqttPub(`${p}/boost_level`,     boost.level);
         this.mqttPub(`${p}/boost_remaining`, boost.remaining);
@@ -738,16 +787,25 @@ class HealthboxPlatform {
   }
 
   async initialize() {
-    this.initMqtt();
-    this.advancedEnabled = await this.enableAdvancedApiIfNeeded();
-    await this.refreshData();
-
-    this.pollTimer = setInterval(() => {
-      void this.refreshData();
-    }, this.pollInterval * 1000);
+    if (this.stopped || this.pollTimer) return;
+    if (this.initializing) return this.initializing;
+    this.initializing = (async () => {
+      try {
+        this.initMqtt();
+      } catch (error) {
+        this.log.warn("MQTT initialization failed; HomeKit monitoring will continue. Check broker settings.");
+      }
+      this.advancedEnabled = await this.enableAdvancedApiIfNeeded();
+      if (this.stopped) return;
+      await this.refreshData();
+      if (this.stopped) return;
+      this.pollTimer = setInterval(() => { void this.refreshData(); }, this.pollInterval * 1000);
+    })();
+    try { await this.initializing; } finally { this.initializing = null; }
   }
 
   async requestJson(method, endpoint, options = {}) {
+    if (this.stopped) throw new Error("Healthbox platform is stopped.");
     const headers = {
       Accept: "application/json",
       ...(options.headers || {}),
@@ -770,6 +828,7 @@ class HealthboxPlatform {
     }
 
     const controller = new AbortController();
+    this.requestControllers.add(controller);
     const timer = setTimeout(
       () => controller.abort(),
       this.requestTimeout * 1000
@@ -791,6 +850,7 @@ class HealthboxPlatform {
       return payload ? JSON.parse(payload) : null;
     } finally {
       clearTimeout(timer);
+      this.requestControllers.delete(controller);
     }
   }
 
@@ -836,6 +896,7 @@ class HealthboxPlatform {
       });
       this.log.info("API key sent, waiting for validation...");
       await this.sleep(10000);
+      if (this.stopped) return false;
     } catch (error) {
       this.log.warn(`Failed to enable advanced API: ${error.message || error}`);
       return false;
@@ -851,14 +912,18 @@ class HealthboxPlatform {
   }
 
   sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    if (this.stopped) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { this.pendingSleeps.delete(timer); resolve(); }, ms);
+      this.pendingSleeps.set(timer, resolve);
+    });
   }
 
   extractSensorMetric(sensors, sensorType, parameterKeys) {
     const keys = Array.isArray(parameterKeys) ? parameterKeys : [parameterKeys];
 
     for (const sensor of sensors || []) {
-      if (!(sensor.type || "").includes(sensorType)) {
+      if (!sensor || typeof sensor.type !== "string" || !sensor.type.includes(sensorType)) {
         continue;
       }
 
@@ -928,8 +993,8 @@ class HealthboxPlatform {
   }
 
   async fetchRoomBoost(roomId) {
-    const data = await this.safeRequest("GET", `/v2/api/boost/${roomId}`);
-    if (!data) {
+    const data = await this.safeRequest("GET", `/v2/api/boost/${encodeURIComponent(roomId)}`);
+    if (!data || typeof data.enable !== "boolean") {
       return null;
     }
 
@@ -959,7 +1024,7 @@ class HealthboxPlatform {
         }
       : { enable: false };
 
-    await this.requestJson("PUT", `/v2/api/boost/${roomId}`, {
+    await this.requestJson("PUT", `/v2/api/boost/${encodeURIComponent(roomId)}`, {
       data: payload,
       headers: { "Content-Type": "application/json" },
     });
@@ -970,7 +1035,7 @@ class HealthboxPlatform {
   async setRoomProfile(roomId, profileName) {
     await this.requestJson(
       "PUT",
-      `/v2/api/data/current/room/${roomId}/profile_name`,
+      `/v2/api/data/current/room/${encodeURIComponent(roomId)}/profile_name`,
       {
         data: JSON.stringify(profileName),
         headers: { "Content-Type": "application/json" },
@@ -993,40 +1058,14 @@ class HealthboxPlatform {
     const { AirQuality } = this.hap.Characteristic;
     const number = this.numberOrNull(value);
 
-    if (number === null) {
-      return AirQuality.UNKNOWN;
+    if (number === null || number < 0 || this.airQualityScale === "unknown") return AirQuality.UNKNOWN;
+    if (this.airQualityScale === "categories") {
+      return Number.isInteger(number) && number >= 1 && number <= 5 ? number : AirQuality.UNKNOWN;
     }
-
-    if (number <= 5) {
-      if (number <= 1) {
-        return AirQuality.EXCELLENT;
-      }
-      if (number <= 2) {
-        return AirQuality.GOOD;
-      }
-      if (number <= 3) {
-        return AirQuality.FAIR;
-      }
-      if (number <= 4) {
-        return AirQuality.INFERIOR;
-      }
-
-      return AirQuality.POOR;
-    }
-
-    if (number <= 20) {
-      return AirQuality.EXCELLENT;
-    }
-    if (number <= 40) {
-      return AirQuality.GOOD;
-    }
-    if (number <= 60) {
-      return AirQuality.FAIR;
-    }
-    if (number <= 80) {
-      return AirQuality.INFERIOR;
-    }
-
+    if (number <= 20) return AirQuality.EXCELLENT;
+    if (number <= 40) return AirQuality.GOOD;
+    if (number <= 60) return AirQuality.FAIR;
+    if (number <= 80) return AirQuality.INFERIOR;
     return AirQuality.POOR;
   }
 
@@ -1103,10 +1142,10 @@ class HealthboxPlatform {
 
   updateMetricsCharacteristic(service, characteristicType, value) {
     if (value === null || value === undefined) {
+      service.getCharacteristic(characteristicType).updateValue(this.communicationError());
       return;
     }
-
-    service.updateCharacteristic(characteristicType, Number(value));
+    this.updateReading(service, characteristicType, value);
   }
 
   isWifiConnected(wifi) {
@@ -1114,11 +1153,10 @@ class HealthboxPlatform {
       return null;
     }
 
-    return (
-      wifi.status === "connected" ||
-      wifi.internet_connection === "connected" ||
-      wifi.internet_connection === true
-    );
+    const state = wifi.status ?? wifi.internet_connection;
+    if (state === "connected" || state === true) return true;
+    if (["disconnected", "offline", "not connected", false].includes(state)) return false;
+    return null;
   }
 
   getInfoValue(source, candidates) {
@@ -1197,7 +1235,7 @@ class HealthboxPlatform {
   }
 
   async refreshData() {
-    if (this.refreshing) {
+    if (this.stopped || this.refreshing) {
       return;
     }
 
@@ -1207,31 +1245,38 @@ class HealthboxPlatform {
       const now = Date.now();
 
       // --- Fast loop: the only two endpoints whose data actually changes ---
-      const baseData = await this.requestJson("GET", "/v2/api/data/current");
+      const baseData = normalizeData(await this.requestJson("GET", "/v2/api/data/current"));
+      if (this.stopped) return;
       const roomIds = Object.keys(baseData.room || {});
       const fan = await this.safeRequest("GET", "/v2/device/fan");
+      if (this.stopped) return;
 
       // --- Quasi-static: firmware + wifi (once, then every STATIC_REFRESH_MS) ---
-      if (now - this.lastStaticFetch >= STATIC_REFRESH_MS) {
+      if (now >= this.staticRetryAt && now - this.lastStaticFetch >= STATIC_REFRESH_MS) {
         const [coreData, wifi] = await Promise.all([
           this.safeRequest("GET", "/renson_core/v2/global"),
           this.safeRequest("GET", "/renson_core/v1/wifi/client/status"),
         ]);
         if (coreData) this.cachedCore = coreData;
-        if (wifi) this.cachedWifi = wifi;
-        this.lastStaticFetch = now;
+        this.cachedWifi = wifi || null;
+        if (coreData && wifi) this.lastStaticFetch = now;
+        this.staticRetryAt = now + 60000;
       }
 
       // --- Error list: every ERROR_POLL_MS ---
       if (now - this.lastErrorPoll >= ERROR_POLL_MS) {
         const errors = await this.safeRequest("GET", "/v2/device/error");
-        this.cachedErrors = Array.isArray(errors) ? errors : [];
-        this.lastErrorPoll = now;
+        if (Array.isArray(errors)) {
+          this.cachedErrors = errors;
+          this.lastErrorsSuccess = now;
+          this.lastErrorPoll = now;
+        }
       }
 
       // --- Boost: sweep all rooms periodically, else only active ones ---
       await this.refreshBoosts(roomIds, now);
 
+      if (this.stopped) return;
       await this.syncAccessories({
         baseData,
         fan,
@@ -1241,7 +1286,12 @@ class HealthboxPlatform {
         boosts: this.collectBoosts(roomIds),
       });
     } catch (error) {
-      this.log.error(`Failed to refresh data: ${error.message || error}`);
+      if (!this.stopped) {
+        this.log.error(`Failed to refresh data: ${error.message || error}`);
+        this.markUnavailable();
+        this.lastSyncSuccess = 0;
+        this.mqttPub("status", "down");
+      }
     } finally {
       this.refreshing = false;
     }
@@ -1267,6 +1317,8 @@ class HealthboxPlatform {
         if (boost) {
           this.boostCache.set(roomId, boost);
           this.updateBoostWatch(roomId, boost);
+        } else {
+          this.boostCache.delete(roomId);
         }
       })
     );
@@ -1296,6 +1348,7 @@ class HealthboxPlatform {
           level: null,
           enabled: false,
           remaining: 0,
+          unknown: true,
         }
       );
     }
@@ -1303,6 +1356,8 @@ class HealthboxPlatform {
   }
 
   async syncAccessories(state) {
+    if (this.stopped) return;
+    state = { ...state, baseData: normalizeData(state.baseData) };
     const activeUuids = new Set();
     const metadata = this.getGlobalMetadata(state.baseData, state.coreData);
 
@@ -1310,8 +1365,11 @@ class HealthboxPlatform {
     this.syncGlobalFanAccessory(state, metadata, activeUuids);
     this.syncConnectivityAccessory(state, metadata, activeUuids);
     await this.syncRoomAccessories(state, metadata, activeUuids);
-    this.removeStaleAccessories(activeUuids);
+    this.removeDisabledAccessories();
+    this.markUnavailable(activeUuids);
     this.publishAllToMqtt(state);
+    this.lastSyncSuccess = Date.now();
+    this.mqttPub("status", "up");
   }
 
   syncGlobalAirQualityAccessory(state, metadata, activeUuids) {
@@ -1347,10 +1405,11 @@ class HealthboxPlatform {
       this.hap.Characteristic.AirQuality,
       this.mapAirQualityIndex(aqiValue)
     );
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
+    this.setStatus(service, true);
+    if (!service.testCharacteristic(this.hap.Characteristic.StatusFault)) service.addCharacteristic(this.hap.Characteristic.StatusFault);
     service.updateCharacteristic(
       this.hap.Characteristic.StatusFault,
-      state.errors.length
+      (!this.lastErrorsSuccess || Date.now() - this.lastErrorsSuccess > ERROR_POLL_MS * 2 || state.errors.length)
         ? this.hap.Characteristic.StatusFault.GENERAL_FAULT
         : this.hap.Characteristic.StatusFault.NO_FAULT
     );
@@ -1360,6 +1419,9 @@ class HealthboxPlatform {
       `${name} Metrics`,
       "global-air-quality"
     );
+    if (metricsService.testCharacteristic(this.customTypes.VocLevelPpm)) {
+      metricsService.removeCharacteristic(metricsService.getCharacteristic(this.customTypes.VocLevelPpm));
+    }
     this.updateMetricsCharacteristic(
       metricsService,
       this.customTypes.AirQualityIndex,
@@ -1409,12 +1471,12 @@ class HealthboxPlatform {
     const flow =
       this.numberOrNull(
         state.fan.flow ?? state.fan.flow_rate ?? state.fan.airflow
-      ) || 0;
+      );
 
     const rpm =
       this.numberOrNull(
         state.fan.rpm ?? state.fan.rotation_speed ?? state.fan.speed
-      ) || 0;
+      );
 
     const pressure = this.numberOrNull(
       state.fan.pressure ?? state.fan.fan_pressure ?? state.fan.static_pressure
@@ -1428,30 +1490,18 @@ class HealthboxPlatform {
       state.fan.voltage ?? state.fan.fan_voltage ?? state.fan.volt
     );
 
-    const active = flow > 0 || rpm > 0;
+    const active = flow !== null || rpm !== null ? flow > 0 || rpm > 0 : null;
 
     this.attachReadOnlyFanHandlers(accessory, service);
 
-    service.updateCharacteristic(
-      this.hap.Characteristic.Active,
-      active
-        ? this.hap.Characteristic.Active.ACTIVE
-        : this.hap.Characteristic.Active.INACTIVE
-    );
-    service.updateCharacteristic(
-      this.hap.Characteristic.CurrentFanState,
-      active
-        ? this.hap.Characteristic.CurrentFanState.BLOWING_AIR
-        : this.hap.Characteristic.CurrentFanState.IDLE
-    );
-    service.updateCharacteristic(
-      this.hap.Characteristic.RotationSpeed,
-      Math.min(100, Math.max(0, Math.round(rpm / 20)))
-    );
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
+    service.getCharacteristic(this.hap.Characteristic.Active).updateValue(active === null ? this.communicationError() : active ? this.hap.Characteristic.Active.ACTIVE : this.hap.Characteristic.Active.INACTIVE);
+    service.getCharacteristic(this.hap.Characteristic.CurrentFanState).updateValue(active === null ? this.communicationError() : active ? this.hap.Characteristic.CurrentFanState.BLOWING_AIR : this.hap.Characteristic.CurrentFanState.IDLE);
+    service.getCharacteristic(this.hap.Characteristic.RotationSpeed).updateValue(rpm === null ? this.communicationError() : Math.min(100, Math.max(0, Math.round(rpm / 20))));
+    this.setStatus(service, active !== null);
+    if (!service.testCharacteristic(this.hap.Characteristic.StatusFault)) service.addCharacteristic(this.hap.Characteristic.StatusFault);
     service.updateCharacteristic(
       this.hap.Characteristic.StatusFault,
-      state.errors.length
+      (!this.lastErrorsSuccess || Date.now() - this.lastErrorsSuccess > ERROR_POLL_MS * 2 || state.errors.length)
         ? this.hap.Characteristic.StatusFault.GENERAL_FAULT
         : this.hap.Characteristic.StatusFault.NO_FAULT
     );
@@ -1507,7 +1557,8 @@ class HealthboxPlatform {
         ? this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED
         : this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED
     );
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
+    this.setStatus(service, true);
+    if (!service.testCharacteristic(this.hap.Characteristic.StatusFault)) service.addCharacteristic(this.hap.Characteristic.StatusFault);
     service.updateCharacteristic(
       this.hap.Characteristic.StatusFault,
       connected
@@ -1599,7 +1650,7 @@ class HealthboxPlatform {
       }
 
       const boost = state.boosts.get(roomId);
-      if (boost) {
+      if (boost && !boost.unknown) {
         if (this.enableBoostControl) {
           this.syncBoostValveAccessory(roomMeta, boost, activeUuids);
         } else {
@@ -1630,11 +1681,8 @@ class HealthboxPlatform {
       accessory.getService(this.hap.Service.TemperatureSensor) ||
       accessory.addService(this.hap.Service.TemperatureSensor, name);
 
-    service.updateCharacteristic(
-      this.hap.Characteristic.CurrentTemperature,
-      Number(value)
-    );
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
+    const valid = this.updateReading(service, this.hap.Characteristic.CurrentTemperature, value);
+    this.setStatus(service, valid);
 
     this.applyRoomInformation(accessory, roomMeta, "Temperature Sensor");
     this.finalizeAccessory(accessory, activeUuids);
@@ -1656,11 +1704,8 @@ class HealthboxPlatform {
       accessory.getService(this.hap.Service.HumiditySensor) ||
       accessory.addService(this.hap.Service.HumiditySensor, name);
 
-    service.updateCharacteristic(
-      this.hap.Characteristic.CurrentRelativeHumidity,
-      Number(value)
-    );
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
+    const valid = this.updateReading(service, this.hap.Characteristic.CurrentRelativeHumidity, value);
+    this.setStatus(service, valid);
 
     this.applyRoomInformation(accessory, roomMeta, "Humidity Sensor");
     this.finalizeAccessory(accessory, activeUuids);
@@ -1683,17 +1728,15 @@ class HealthboxPlatform {
       accessory.addService(this.hap.Service.CarbonDioxideSensor, name);
 
     const co2Level = Number(value);
-    service.updateCharacteristic(
-      this.hap.Characteristic.CarbonDioxideLevel,
-      co2Level
-    );
+    const valid = this.updateReading(service, this.hap.Characteristic.CarbonDioxideLevel, co2Level);
     service.updateCharacteristic(
       this.hap.Characteristic.CarbonDioxideDetected,
       co2Level >= 1000
         ? this.hap.Characteristic.CarbonDioxideDetected.CO2_LEVELS_ABNORMAL
         : this.hap.Characteristic.CarbonDioxideDetected.CO2_LEVELS_NORMAL
     );
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
+    if (!valid) service.getCharacteristic(this.hap.Characteristic.CarbonDioxideDetected).updateValue(this.communicationError());
+    this.setStatus(service, valid);
 
     this.applyRoomInformation(accessory, roomMeta, "CO2 Sensor");
     this.finalizeAccessory(accessory, activeUuids);
@@ -1719,14 +1762,15 @@ class HealthboxPlatform {
       this.hap.Characteristic.AirQuality,
       this.mapAirQualityIndex(aqiValue)
     );
-    if (vocMetric) {
-      const normalizedVoc = this.normalizeVocDensity(vocMetric.value);
-      service.updateCharacteristic(
-        this.hap.Characteristic.VOCDensity,
-        normalizedVoc
-      );
+    {
+      const density = vocDensity(vocMetric);
+      if (density !== null) {
+        this.updateReading(service, this.hap.Characteristic.VOCDensity, Math.round(density));
+      } else if (service.testCharacteristic(this.hap.Characteristic.VOCDensity)) {
+        service.getCharacteristic(this.hap.Characteristic.VOCDensity).updateValue(this.communicationError());
+      }
     }
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
+    this.setStatus(service, true);
 
     // Air-quality metrics: AQI + VOC only (no fan electrical data for room accessories).
     const metricsService = this.getAirMetricsService(
@@ -1734,6 +1778,7 @@ class HealthboxPlatform {
       `${name} Metrics`,
       `${roomMeta.roomId}-air-quality`
     );
+    metricsService.getCharacteristic(this.customTypes.VocLevelPpm).displayName = "VOC Raw Value";
     this.updateMetricsCharacteristic(
       metricsService,
       this.customTypes.AirQualityIndex,
@@ -1788,7 +1833,7 @@ class HealthboxPlatform {
       this.hap.Characteristic.RotationSpeed,
       rotationSpeed
     );
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
+    this.setStatus(service, true);
 
     // Ventilation metrics: flow rates only — no fan electrical characteristics.
     // Fan electrical data (power, pressure, RPM, voltage) belongs exclusively
@@ -1846,7 +1891,7 @@ class HealthboxPlatform {
         ? this.hap.Characteristic.OccupancyDetected.OCCUPANCY_DETECTED
         : this.hap.Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED
     );
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
+    this.setStatus(service, true);
 
     this.applyRoomInformation(
       accessory,
@@ -1919,7 +1964,7 @@ class HealthboxPlatform {
 
     this.attachProfileFanHandlers(accessory, service);
 
-    const speed = this.speedFromProfile(profileName);
+    const speed = PROFILE_SPEEDS[profileName];
     // Active is always ACTIVE — this accessory is a profile selector, not
     // an on/off control.
     service.updateCharacteristic(
@@ -1930,14 +1975,14 @@ class HealthboxPlatform {
       this.hap.Characteristic.CurrentFanState,
       this.hap.Characteristic.CurrentFanState.BLOWING_AIR
     );
-    service.updateCharacteristic(this.hap.Characteristic.RotationSpeed, speed);
+    service.getCharacteristic(this.hap.Characteristic.RotationSpeed).updateValue(speed === undefined ? this.communicationError() : speed);
 
     this.applyRoomInformation(accessory, roomMeta, `Profile: ${profileName}`);
     this.finalizeAccessory(accessory, activeUuids);
   }
 
   attachProfileFanHandlers(accessory, service) {
-    if (this.profileHandlersAttached.has(accessory.UUID)) {
+    if (this.profileHandlersAttached.has(service)) {
       return;
     }
 
@@ -1961,13 +2006,14 @@ class HealthboxPlatform {
           this.log.error(
             `Failed to set profile for room ${roomId}: ${error.message || error}`
           );
-          return;
+          throw this.communicationError();
         }
-        await this.sleep(1000);
-        void this.refreshData();
+        void this.sleep(1000).then(() => {
+          if (!this.stopped) return this.refreshData();
+        }).catch((error) => this.log.error(`Profile refresh failed: ${error.message || error}`));
       });
 
-    this.profileHandlersAttached.add(accessory.UUID);
+    this.profileHandlersAttached.add(service);
   }
 
   prepareAccessory({ uuidSeed, name, category, context }) {
@@ -2046,7 +2092,7 @@ class HealthboxPlatform {
   }
 
   attachBoostSwitchHandlers(accessory, service) {
-    if (this.boostHandlersAttached.has(accessory.UUID)) {
+    if (this.boostHandlersAttached.has(service)) {
       return;
     }
 
@@ -2066,18 +2112,25 @@ class HealthboxPlatform {
           this.log.error(
             `Failed to set boost for room ${roomId}: ${error.message || error}`
           );
-          return;
+          throw new this.hap.HapStatusError(
+            this.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE
+          );
         }
         // Watch this room immediately so the countdown is polled every cycle
         // without waiting for the next full sweep.
         if (enabled) {
           this.boostWatch.add(roomId);
         }
-        await this.sleep(1500);
-        void this.refreshData();
+        // Acknowledge the completed PUT immediately. The settling delay must
+        // not keep the HomeKit write handler pending.
+        void this.sleep(1500).then(() => {
+          if (!this.stopped) return this.refreshData();
+        }).catch((error) => {
+          this.log.error(`Failed to refresh after boost: ${error.message || error}`);
+        });
       });
 
-    this.boostHandlersAttached.add(accessory.UUID);
+    this.boostHandlersAttached.add(service);
   }
 
   finalizeAccessory(accessory, activeUuids) {
@@ -2094,6 +2147,55 @@ class HealthboxPlatform {
       accessory,
     ]);
     accessory.registered = true;
+  }
+
+  updateReading(service, type, value) {
+    const characteristic = service.getCharacteristic(type);
+    const number = this.numberOrNull(value);
+    const { minValue, maxValue } = characteristic.props;
+    if (number === null || (minValue !== undefined && number < minValue) || (maxValue !== undefined && number > maxValue)) {
+      characteristic.updateValue(this.communicationError());
+      return false;
+    }
+    characteristic.updateValue(number);
+    return true;
+  }
+
+  communicationError() {
+    return new this.hap.HapStatusError(this.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+  }
+
+  setStatus(service, active) {
+    if (!service.testCharacteristic(this.hap.Characteristic.StatusActive)) service.addCharacteristic(this.hap.Characteristic.StatusActive);
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, active);
+  }
+
+  markUnavailable(activeUuids = new Set()) {
+    for (const [uuid, accessory] of this.accessories) {
+      if (activeUuids.has(uuid)) continue;
+      for (const service of accessory.services) {
+        if (service.UUID === this.hap.Service.AccessoryInformation.UUID) continue;
+        if (service.testCharacteristic(this.hap.Characteristic.StatusActive)) service.updateCharacteristic(this.hap.Characteristic.StatusActive, false);
+        for (const characteristic of service.characteristics) {
+          if ([this.hap.Characteristic.Name.UUID, this.hap.Characteristic.StatusActive.UUID].includes(characteristic.UUID)) continue;
+          characteristic.updateValue(this.communicationError());
+        }
+      }
+    }
+  }
+
+  removeDisabledAccessories() {
+    // Only explicit configuration changes authorize removal. Missing samples
+    // and transient network failures must never remove HomeKit identities.
+    const keep = new Set();
+    for (const [uuid, accessory] of this.accessories) {
+      const kind = accessory.context.kind;
+      const disabled = (kind === "profile" && !this.enableProfileControl) ||
+        (kind === "boost-switch" && !this.enableBoostControl) ||
+        (kind === "boost-sensor" && this.enableBoostControl);
+      if (!disabled) keep.add(uuid);
+    }
+    this.removeStaleAccessories(keep);
   }
 
   removeStaleAccessories(activeUuids) {

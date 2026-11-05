@@ -89,7 +89,7 @@
 
 <div class="form-group">
   <label for="apiKey">Clé API avancée</label>
-  <input type="text" id="apiKey" placeholder="Votre clé Renson" />
+  <input type="password" autocomplete="off" id="apiKey" placeholder="Votre clé Renson" />
   <small>Active les métriques électriques du ventilateur (puissance, pression, RPM, tension).</small>
 </div>
 
@@ -110,12 +110,22 @@
 
 <div class="form-group">
   <label for="pollInterval">Intervalle de sondage (secondes)</label>
-  <input type="number" id="pollInterval" min="5" value="30" />
+  <input type="number" id="pollInterval" min="5" max="3600" value="30" />
 </div>
 
 <div class="form-group">
   <label for="requestTimeout">Timeout HTTP (secondes)</label>
-  <input type="number" id="requestTimeout" min="1" value="10" />
+  <input type="number" id="requestTimeout" min="1" max="120" value="10" />
+</div>
+
+<div class="form-group">
+  <label for="airQualityScale">Échelle de qualité de l’air</label>
+  <select id="airQualityScale">
+    <option value="unknown">Non précisée — valeur brute uniquement</option>
+    <option value="index">Indice continu (0–100, faible = meilleur)</option>
+    <option value="categories">Catégories (1 = excellent, 5 = mauvais)</option>
+  </select>
+  <small>Choisir uniquement l’échelle confirmée pour votre appareil. La valeur brute reste disponible dans les métriques personnalisées.</small>
 </div>
 
 <!-- ═══════════════════════════ FONCTIONS ════════════════════════════ -->
@@ -164,7 +174,7 @@
   <div class="form-group">
     <label for="mqttTopicPrefix">Préfixe des topics</label>
     <input type="text" id="mqttTopicPrefix" placeholder="home/healthbox" />
-    <small>Ex : <code>home/healthbox/room/1/temperature</code></small>
+    <small>Ex : <code>home/healthbox/cuisine/temperature</code></small>
   </div>
   <div class="form-group">
     <label for="mqttUsername">Utilisateur (optionnel)</label>
@@ -172,7 +182,7 @@
   </div>
   <div class="form-group">
     <label for="mqttPassword">Mot de passe (optionnel)</label>
-    <input type="text" id="mqttPassword" placeholder="" />
+    <input type="password" autocomplete="off" id="mqttPassword" placeholder="" />
   </div>
 </div>
 
@@ -208,6 +218,9 @@
 /* ------------------------------------------------------------------ */
 /* Helpers                                                              */
 /* ------------------------------------------------------------------ */
+let originalConfig = {};
+let configLoaded = false;
+let discoveryGeneration = 0;
 let discoveredRooms = [];   // [{id, name, type}]
 
 function int(v)  { const n = parseInt(v, 10);  return isNaN(n) ? undefined : n; }
@@ -220,6 +233,7 @@ function bool(v) { return v === true; }
 const $ = (id) => document.getElementById(id);
 
 const elHost             = $("host");
+const elAirQualityScale = $("airQualityScale");
 const elApiKey           = $("apiKey");
 const elPoll             = $("pollInterval");
 const elTimeout          = $("requestTimeout");
@@ -269,9 +283,16 @@ function buildRoomCell(selectedId) {
       const opt = document.createElement("option");
       opt.value = r.id;
       opt.textContent = `${r.id} – ${r.name}${r.type ? " (" + r.type + ")" : ""}`;
-      if (r.id === selectedId) opt.selected = true;
+      if (String(r.id) === String(selectedId) || r.name.toLowerCase() === String(selectedId || "").toLowerCase()) opt.selected = true;
       sel.appendChild(opt);
     });
+    if (selectedId && !discoveredRooms.some(r => String(r.id) === String(selectedId) || r.name.toLowerCase() === String(selectedId).toLowerCase())) {
+      const existing = document.createElement("option");
+      existing.value = selectedId;
+      existing.textContent = `${selectedId} (réglage conservé)`;
+      existing.selected = true;
+      sel.appendChild(existing);
+    }
     sel.dataset.roomField = "1";
     return sel;
   } else {
@@ -361,6 +382,7 @@ function readOverrides() {
 /* Discover rooms (shared by auto-load + manual button)                  */
 /* ------------------------------------------------------------------ */
 async function discoverRooms({ silent = false } = {}) {
+  const generation = ++discoveryGeneration;
   if (!silent) {
     elStatus.className = "";
     elStatus.style.display = "none";
@@ -373,6 +395,7 @@ async function discoverRooms({ silent = false } = {}) {
     const result = await window.homebridge.request("/discover-rooms", {
       host: str(elHost.value),
     });
+    if (generation !== discoveryGeneration) return;
     discoveredRooms = result.rooms || [];
     refreshRoomCells();
 
@@ -382,12 +405,12 @@ async function discoverRooms({ silent = false } = {}) {
         + discoveredRooms.map(r => `${r.name} (${r.id})`).join(", ");
     }
   } catch (err) {
-    if (!silent) {
+    if (!silent && generation === discoveryGeneration) {
       elStatus.className = "err";
       elStatus.textContent = `Erreur : ${err.message || err}`;
     }
   } finally {
-    if (!silent) {
+    if (generation === discoveryGeneration) {
       btnDiscover.disabled = false;
       btnDiscover.innerHTML = `
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -405,16 +428,18 @@ async function discoverRooms({ silent = false } = {}) {
 async function loadConfig() {
   const configs = await window.homebridge.getPluginConfig();
   const cfg = configs[0] || {};
+  originalConfig = { ...cfg };
+  elAirQualityScale.value = cfg.airQualityScale || "unknown";
 
-  elHost.value        = cfg.host          ?? "";
+  elHost.value        = cfg.healthBoxUri || cfg.baseUrl || cfg.host || "";
   elApiKey.value      = cfg.apiKey        ?? "";
   elPoll.value        = cfg.pollInterval  ?? 30;
   elTimeout.value     = cfg.requestTimeout ?? 10;
   elBoost.checked     = cfg.enableBoostControl  ?? false;
   elProfile.checked   = cfg.enableProfileControl ?? false;
   elDisableLog.checked= cfg.disableLogging ?? false;
-  elBoostSpeed.value  = cfg.boostFanSpeed  ?? 100;
-  elBoostDur.value    = cfg.boostDuration  ?? 600;
+  elBoostSpeed.value  = cfg.boostFanSpeed ?? cfg.boostLevel ?? 100;
+  elBoostDur.value    = cfg.boostDuration ?? cfg.boostTimeout ?? 600;
   syncBoostVisibility();
 
   elMqttEnabled.checked  = cfg.mqttEnabled ?? false;
@@ -433,13 +458,27 @@ async function loadConfig() {
   (cfg.roomBoostOverrides || []).forEach(o =>
     addOverrideRow(o.room, o.boostLevel, o.boostDuration)
   );
+  configLoaded = true;
+  btnSave.disabled = false;
 }
 
 /* ------------------------------------------------------------------ */
 /* Build config object from form                                        */
 /* ------------------------------------------------------------------ */
 function buildConfig() {
-  const cfg = { platform: "HealthBoxHomebridgePlugin" };
+  if (!configLoaded) throw new Error("La configuration n'est pas encore chargée.");
+  for (const input of document.querySelectorAll('input[type="number"]')) {
+    if (!input.checkValidity()) throw new Error("Vérifiez les valeurs numériques et leurs limites.");
+  }
+  const cfg = { ...originalConfig, platform: originalConfig.platform || "HealthBoxHomebridgePlugin" };
+  // Explicit empty values are needed: Homebridge UI merges existing blocks.
+  cfg.healthBoxUri = "";
+  cfg.baseUrl = "";
+  cfg.host = "";
+  cfg.apiKey = "";
+  cfg.mqttUsername = "";
+  cfg.mqttPassword = "";
+  cfg.airQualityScale = elAirQualityScale.value;
 
   const host  = str(elHost.value);
   const key   = str(elApiKey.value);
@@ -460,7 +499,7 @@ function buildConfig() {
     const broker = str(elMqttBroker.value);
     const prefix = str(elMqttPrefix.value);
     const user   = str(elMqttUser.value);
-    const pass   = str(elMqttPass.value);
+    const pass   = elMqttPass.value;
     if (broker) cfg.mqttBroker       = broker;
     if (prefix) cfg.mqttTopicPrefix  = prefix;
     if (user)   cfg.mqttUsername     = user;
@@ -474,8 +513,7 @@ function buildConfig() {
     if (dur) cfg.boostDuration = dur;
   }
 
-  const overrides = readOverrides();
-  if (overrides.length) cfg.roomBoostOverrides = overrides;
+  cfg.roomBoostOverrides = readOverrides();
 
   return cfg;
 }
@@ -505,6 +543,7 @@ btnSave.addEventListener("click", async () => {
     const cfg = buildConfig();
     await window.homebridge.updatePluginConfig([cfg]);
     await window.homebridge.savePluginConfig();
+    originalConfig = { ...cfg };
     btnSave.textContent = "✓ Enregistré";
     setTimeout(() => { btnSave.textContent = "Enregistrer"; btnSave.disabled = false; }, 2000);
   } catch (err) {
@@ -518,11 +557,21 @@ btnSave.addEventListener("click", async () => {
 /* Init                                                                  */
 /* ------------------------------------------------------------------ */
 syncBoostVisibility();
-loadConfig();
+btnSave.disabled = true;
+loadConfig().catch((err) => {
+  configLoaded = false;
+  btnSave.disabled = true;
+  elStatus.className = "err";
+  elStatus.textContent = `Chargement impossible : ${err.message || err}`;
+});
 
 // Re-discover rooms silently si l'adresse IP est modifiée
 elHost.addEventListener("change", () => {
-  if (str(elHost.value)) discoverRooms({ silent: true });
+  discoveryGeneration++;
+  discoveredRooms = [];
+  refreshRoomCells();
+  if (str(elHost.value)) void discoverRooms({ silent: true });
+  else btnDiscover.disabled = false;
 });
 </script>
 </body>

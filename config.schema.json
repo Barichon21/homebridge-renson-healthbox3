@@ -2,7 +2,7 @@
   "pluginAlias": "HealthBoxHomebridgePlugin",
   "pluginType": "platform",
   "singular": true,
-  "headerDisplay": "Renson Healthbox 3 — exposes room air-quality sensors, ventilation rates, fan metrics, boost and profile control to HomeKit. Connects to the unit's **local API** (no cloud).",
+  "headerDisplay": "Renson Healthbox 3 \u2014 exposes room air-quality sensors, ventilation rates, fan metrics, boost and profile control to HomeKit. Connects to the unit's **local API** (no cloud).",
   "footerDisplay": "For help, see the [README](https://github.com/barichon21/homebridge-renson-healthbox3#readme).",
   "schema": {
     "type": "object",
@@ -20,7 +20,6 @@
         "placeholder": "192.168.x.x",
         "description": "IP address or hostname of the Healthbox unit. Use this or healthBoxUri."
       },
-
       "apiKey": {
         "title": "Advanced API Key",
         "type": "string",
@@ -31,14 +30,16 @@
         "type": "integer",
         "default": 30,
         "minimum": 5,
-        "description": "Seconds between data refreshes."
+        "description": "Seconds between data refreshes.",
+        "maximum": 3600
       },
       "requestTimeout": {
         "title": "Request Timeout (seconds)",
         "type": "integer",
         "default": 10,
         "minimum": 1,
-        "description": "HTTP timeout when calling the Healthbox."
+        "description": "HTTP timeout when calling the Healthbox.",
+        "maximum": 120
       },
       "enableBoostControl": {
         "title": "Enable Boost Control",
@@ -71,7 +72,7 @@
       "roomBoostOverrides": {
         "title": "Per-Room Boost Overrides",
         "type": "array",
-        "description": "Override boost level and/or duration for specific rooms. Use the numeric room ID shown in Homebridge logs (e.g. 1, 2, 3…). Leave a field empty to fall back to the global setting.",
+        "description": "Override boost level and/or duration for specific rooms. Use the numeric room ID shown in Homebridge logs (e.g. 1, 2, 3\u2026). Leave a field empty to fall back to the global setting.",
         "condition": {
           "functionBody": "return model.enableBoostControl === true;"
         },
@@ -99,7 +100,9 @@
               "description": "Override boost duration for this room. Leave empty to use the global value."
             }
           },
-          "required": ["room"]
+          "required": [
+            "room"
+          ]
         }
       },
       "enableProfileControl": {
@@ -141,6 +144,17 @@
         "type": "string",
         "default": "home/healthbox",
         "description": "Root topic prefix. All messages will be published under this prefix."
+      },
+      "airQualityScale": {
+        "title": "Air quality scale",
+        "type": "string",
+        "enum": [
+          "unknown",
+          "index",
+          "categories"
+        ],
+        "default": "unknown",
+        "description": "Use the scale documented for your device. Unknown exposes only the raw index; index uses a continuous 0\u2013100 scale, categories uses 1 (excellent) to 5 (poor)."
       }
     }
   }
