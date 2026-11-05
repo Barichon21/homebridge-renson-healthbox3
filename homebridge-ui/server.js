@@ -28,28 +28,27 @@ class HealthboxUiServer extends HomebridgePluginUiServer {
     const url = `${baseUrl}/v2/api/data/current`;
 
     // Node's built-in fetch (Node ≥18) is available in the Homebridge environment
-    let response;
+    let data;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 8000);
-      response = await fetch(url, { signal: ctrl.signal });
-      clearTimeout(timer);
+      const response = await fetch(url, { signal: ctrl.signal });
+      if (!response.ok) {
+        throw new Error(`L'API Healthbox a répondu ${response.status} ${response.statusText}`);
+      }
+      try {
+        data = await response.json();
+      } catch (err) {
+        if (err.name === "AbortError") throw err;
+        throw new Error("La réponse de la Healthbox n'est pas du JSON valide.");
+      }
     } catch (err) {
       if (err.name === "AbortError") {
         throw new Error(`Timeout : impossible de joindre ${baseUrl} en 8 secondes.`);
       }
-      throw new Error(`Erreur réseau : ${err.message}`);
-    }
-
-    if (!response.ok) {
-      throw new Error(`L'API Healthbox a répondu ${response.status} ${response.statusText}`);
-    }
-
-    let data;
-    try {
-      data = await response.json();
-    } catch {
-      throw new Error("La réponse de la Healthbox n'est pas du JSON valide.");
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
 
     // Accept both { room: [...] } and { home: { room: [...] } } layouts

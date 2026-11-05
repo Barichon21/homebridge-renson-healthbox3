@@ -4,6 +4,22 @@ All notable changes to this plugin are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Include Node.js 26 in the supported engine range.
+- Regenerate the stale dependency lockfile and test against Homebridge 2.5.0.
+
+### Fixed
+- Stop polling on shutdown, including shutdown during initialization.
+- Keep the room discovery timeout active through JSON body reading and always clear its timer.
+- Complete Boost writes after the device request without an additional 1.5-second wait.
+- Report failed Boost writes to HomeKit as communication errors.
+
+### Tests
+- Add simulated compatibility tests for registration, HAP accessories, HTTP requests,
+  timeouts, shutdown, polling cadence and Boost write handling.
+
 ## [1.1.0] - 2026-06-09
 
 ### Changed

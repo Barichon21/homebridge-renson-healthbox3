@@ -45,6 +45,7 @@ class HealthboxPlatform {
     this.accessoriesToForceUpdate = [];
     this.refreshing = false;
     this.pollTimer = null;
+    this.stopped = false;
     this.advancedEnabled = false;
 
     // Tiered-polling state. boostWatch = rooms with an active boost we must poll
@@ -91,6 +92,9 @@ class HealthboxPlatform {
     });
 
     this.api.on("shutdown", () => {
+      this.stopped = true;
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
       this.mqttShutdown();
     });
 
@@ -738,9 +742,12 @@ class HealthboxPlatform {
   }
 
   async initialize() {
+    if (this.stopped) return;
     this.initMqtt();
     this.advancedEnabled = await this.enableAdvancedApiIfNeeded();
+    if (this.stopped) return;
     await this.refreshData();
+    if (this.stopped) return;
 
     this.pollTimer = setInterval(() => {
       void this.refreshData();
@@ -1197,7 +1204,7 @@ class HealthboxPlatform {
   }
 
   async refreshData() {
-    if (this.refreshing) {
+    if (this.stopped || this.refreshing) {
       return;
     }
 
@@ -2066,15 +2073,22 @@ class HealthboxPlatform {
           this.log.error(
             `Failed to set boost for room ${roomId}: ${error.message || error}`
           );
-          return;
+          throw new this.hap.HapStatusError(
+            this.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE
+          );
         }
         // Watch this room immediately so the countdown is polled every cycle
         // without waiting for the next full sweep.
         if (enabled) {
           this.boostWatch.add(roomId);
         }
-        await this.sleep(1500);
-        void this.refreshData();
+        // Acknowledge the completed PUT immediately. The settling delay must
+        // not keep the HomeKit write handler pending.
+        void this.sleep(1500).then(() => {
+          if (!this.stopped) return this.refreshData();
+        }).catch((error) => {
+          this.log.error(`Failed to refresh after boost: ${error.message || error}`);
+        });
       });
 
     this.boostHandlersAttached.add(accessory.UUID);
