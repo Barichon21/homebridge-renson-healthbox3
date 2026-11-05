@@ -1,26 +1,12 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { pathToFileURL } = require('node:url');
-const path = require('node:path');
 const http = require('node:http');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const apiModule = import(pathToFileURL(path.join(path.dirname(require.resolve('homebridge')), 'api.js')));
-async function platform(config = {}) {
-  const { HomebridgeAPI } = await apiModule;
-  const api = new HomebridgeAPI();
-  const aliases = [];
-  api.on('registerPlatform', (...args) => aliases.push(args));
-  let Ctor;
-  const register = api.registerPlatform.bind(api);
-  api.registerPlatform = (...args) => { Ctor = args[1]; register(...args); };
-  require('../index')(api);
-  const errors = [];
-  const log = { info(){}, warn(){}, debug(){}, error(e){ errors.push(e); } };
-  return { p: new Ctor(log, config, api), api, aliases, errors };
-}
+const path = require('node:path');
+const { platform } = require('./helpers.cjs');
 test('exact target versions and both legacy platform aliases', async () => {
-  assert.equal(process.version, 'v26.13.0');
+  assert.ok([22, 24, 26].includes(Number(process.versions.node.split('.')[0])));
   const { api, aliases } = await platform();
   assert.equal(api.serverVersion, '2.5.0');
   assert.equal(aliases.length, 2);
@@ -83,7 +69,7 @@ test('discovery timeout covers a stalled response body and clears timer', async 
   class Ui { constructor(){ui=this;} onRequest(){} ready(){} }
   const source=fs.readFileSync(path.join(__dirname,'../homebridge-ui/server.js'),'utf8');
   vm.runInNewContext(source,{
-    require:()=>({HomebridgePluginUiServer:Ui}), AbortController,
+    require:name=>name === "@homebridge/plugin-ui-utils" ? ({HomebridgePluginUiServer:Ui}) : require("../lib/api-data"), AbortController,
     setTimeout:fn=>setTimeout(fn,20), clearTimeout:id=>{cleared++;clearTimeout(id);},
     fetch:async(_url,{signal})=>({ok:true,json:()=>new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(Object.assign(new Error(),{name:'AbortError'}))))})
   });
@@ -93,7 +79,7 @@ test('discovery timeout covers a stalled response body and clears timer', async 
 test('tiered polling skips static endpoints and stops network after shutdown', async () => {
   const {p,api,errors}=await platform({host:'127.0.0.1'});
   const calls=[];
-  p.requestJson=async (_method,url)=>{calls.push(url);return url==='/v2/api/data/current'?{room:{}}:{};};
+  p.requestJson=async (_method,url)=>{calls.push(url);return url==='/v2/api/data/current'?{room:{}}:url==='/v2/device/error'?[]:{};};
   p.syncAccessories=async()=>{};
   await p.refreshData();
   assert.ok(calls.includes('/renson_core/v2/global'));
@@ -117,7 +103,8 @@ test('boost acknowledges PUT without waiting for settling; failures reach HomeKi
   await c.handleSetRequest(true);
   assert.equal(sent,true);
   assert.equal(p.boostWatch.has('3'),true);
-  api.emit('shutdown');release();
+  release();
   p.setRoomBoost=async()=>{throw new Error('simulated device failure');};
   await assert.rejects(c.handleSetRequest(false));
+  api.emit('shutdown');
 });

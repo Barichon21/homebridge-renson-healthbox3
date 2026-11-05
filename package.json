@@ -6,6 +6,7 @@
   "main": "index.js",
   "files": [
     "index.js",
+    "lib/",
     "config.schema.json",
     "homebridge-ui/",
     "CHANGELOG.md"
@@ -31,7 +32,9 @@
     "mqtt": "^5.15.1"
   },
   "devDependencies": {
-    "homebridge": "2.5.0"
+    "homebridge": "2.5.0",
+    "jsdom": "31.0.0",
+    "mqtt-packet": "9.0.2"
   },
   "license": "MIT",
   "author": {

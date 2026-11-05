@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Reliability audit
+- Retain accessory identities through transient failures and mark readings unavailable.
+- Reattach commands to recreated service objects; propagate profile write failures.
+- Reject missing/non-numeric readings instead of reporting false zeros.
+- Normalize object, array and nested room inventories in one shared module.
+- Require an explicit AQI scale; preserve raw VOC without guessed units.
+- Preserve known errors after failed reads and retry static reads after failures.
+- Fix configuration clearing, legacy fields, discovery races and numeric validation.
+- Isolate MQTT initialization failures, redact URL credentials, disambiguate room topics,
+  and allow graceful QoS 1 shutdown; cancel HTTP requests and settling timers on shutdown.
+- Update ip-address to 10.7.6 in the lockfile; add a Node 22/24/26 CI matrix.
+- Expand validation to 37 automated tests including DOM and local MQTT simulation.
+
 ### Changed
 - Include Node.js 26 in the supported engine range.
 - Regenerate the stale dependency lockfile and test against Homebridge 2.5.0.

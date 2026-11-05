@@ -1,6 +1,7 @@
 "use strict";
 
 const { HomebridgePluginUiServer } = require("@homebridge/plugin-ui-utils");
+const { endpointUrl, normalizeRooms } = require("../lib/api-data");
 
 class HealthboxUiServer extends HomebridgePluginUiServer {
   constructor() {
@@ -12,18 +13,7 @@ class HealthboxUiServer extends HomebridgePluginUiServer {
   async discoverRooms(payload) {
     const { host, healthBoxUri } = payload || {};
 
-    // Build base URL from either field
-    let baseUrl = "";
-    if (host) {
-      const trimmed = host.trim();
-      baseUrl = trimmed.startsWith("http") ? trimmed.replace(/\/$/, "") : `http://${trimmed}`;
-    } else if (healthBoxUri) {
-      baseUrl = healthBoxUri.trim().replace(/\/$/, "");
-    }
-
-    if (!baseUrl) {
-      throw new Error("Aucune adresse Healthbox fournie (host ou healthBoxUri requis).");
-    }
+    const baseUrl = endpointUrl(host || healthBoxUri);
 
     const url = `${baseUrl}/v2/api/data/current`;
 
@@ -51,15 +41,8 @@ class HealthboxUiServer extends HomebridgePluginUiServer {
       clearTimeout(timer);
     }
 
-    // Accept both { room: [...] } and { home: { room: [...] } } layouts
-    const roomList =
-      (Array.isArray(data.room) && data.room) ||
-      (data.home && Array.isArray(data.home.room) && data.home.room) ||
-      [];
-
-    if (!roomList.length) {
-      throw new Error("Aucune pièce trouvée dans la réponse de la Healthbox.");
-    }
+    const roomList = Object.values(normalizeRooms(data));
+    if (!roomList.length) throw new Error("Aucune pièce trouvée dans la réponse de la Healthbox.");
 
     // Strip emoji from names (same logic as the main plugin)
     const sanitize = (str) =>
